@@ -4,49 +4,51 @@
 #                           \\\|///
 #                          \\ - - //
 #                           ( @ @ )
-#O-----------------------oOOo-(_)-oOOo-------------------------O
-#|                                                             |
-#| SIP over WebSocket (with double registartion) server config |
-#| Golosovsky Oleg ogolosovskiy@nordigy.ru                     |
-#|                                                             |
-#|                               Oooo                          |
-#O------------------------oooO---(  )--------------------------O
+#O-----------------------oOOo-(_)-oOOo-----------------------------------O
+#|                                                                       |
+#| SIP over WebSocket (with double registration) server config           |
+#|                 ogolosovskiy@nordigy.ru                               |
+#|                                                                       |
+#| Kamailio version  https://github.com/sipwise/mediaproxy-ng.git master |
+#| Modules include_modules=tls websocket rtpproxy-ng                     |
+#| Media proxy  https://github.com/sipwise/mediaproxy-ng.git master      |
+#|                                                                       |
+#|                               Oooo                                    |
+#O------------------------oooO---(  )------------------------------------O
 #                         (   )  ) /
 #                          \ (  (_/
 #                           \_)
 
 
-log_facility=LOG_LOCAL0
-
-# #!substdef "!DBURL!sqlite:///etc/kamailio/db.sqlite!g"
-#!substdef "!MY_IP_ADDR!199.68.214.218!g"
-#!substdef "!MY_DOMAIN!sip-rndmsg.lab.nordigy.ru!g"
+##!substdef "!MY_IP_ADDR!x.x.x.x!g"
+#!substdef "!MY_DOMAIN!x!g"
 #!substdef "!MY_DOMAIN_FULL!MY_DOMAIN:5060!g"
 #!substdef "!MY_WS_PORT!80!g"
 #!substdef "!MY_WSS_PORT!443!g"
-#!substdef "!MY_MSRP_PORT!9000!g"
 #!substdef "!MY_SIP_ADDR!MY_IP_ADDR:5060!g"
 #!substdef "!MY_WS_ADDR!tcp:MY_IP_ADDR:MY_WS_PORT!g"
 #!substdef "!MY_WSS_ADDR!tls:MY_IP_ADDR:MY_WSS_PORT!g"
-#!substdef "!MY_MSRP_ADDR!tls:MY_IP_ADDR:MY_MSRP_PORT!g"
-#!substdef "!MSRP_MIN_EXPIRES!1800!g"
-#!substdef "!MSRP_MAX_EXPIRES!3600!g"
-#!substdef "!SBC_IP!192.209.31.32!g"
+#!substdef "!SBC_IP!x.x.x.x!g"
 #!substdef "!SBC_PORT!5090!g"
 #!substdef "!SBC_ADDR!SBC_IP:SBC_PORT!g"
+#!substdef "!MAX_MESSAGE_SIZE!2048!g"
 
 # #!define LOCAL_TEST_RUN
 # #!define WITH_TLS
 #!define WITH_WEBSOCKETS
-## !define WITH_MSRP
 
-## run ##> /usr/local/sbin/kamailio -m 1024  -w /usr/local/ -f /usr/local/etc/kamailio/kamailio.cfg
+# /usr/local/sbin/kamailio -m 1024  -w /usr/local/ -f /usr/local/etc/kamailio/openser-w2s.cfg
+# /usr/sbin/mediaproxy-ng -i 192.209.30.16 -p /var/run/mediaproxy-ng.pid -m 35000 -M 45000 --listen-ng=5561
+
 ####### Global Parameters #########
 
 fork=yes
 children=4
 
 log_facility=LOG_LOCAL0
+debug=4
+auto_aliases=no
+mpath="/usr/local/lib64/kamailio/modules_k/:/usr/local/lib64/kamailio/modules/"
 
 #!ifdef WITH_TLS
 enable_tls=1
@@ -59,9 +61,6 @@ listen=MY_WS_ADDR
 listen=MY_WSS_ADDR
 #!endif
 #!endif
-#!ifdef WITH_MSRP
-listen=MY_MSRP_ADDR
-#!endif
 
 tcp_connection_lifetime=3604
 tcp_accept_no_cl=yes
@@ -69,8 +68,6 @@ tcp_rd_buf_size=16384
 
 # syn_branch=0
 
-debug=2
-mpath="/usr/local/lib64/kamailio/modules_k/:/usr/local/lib64/kamailio/modules/"
 
 loadmodule "tm.so"
 loadmodule "sl.so"
@@ -90,11 +87,6 @@ loadmodule "mi_rpc.so"
 loadmodule "corex.so"
 #!ifdef WITH_TLS
 loadmodule "tls.so"
-#!endif
-#!ifdef WITH_MSRP
-loadmodule "msrp.so"
-loadmodule "htable.so"
-loadmodule "cfgutils.so"
 #!endif
 #!ifdef WITH_WEBSOCKETS
 loadmodule "xhttp.so"
@@ -166,11 +158,6 @@ modparam("nathelper|registrar", "received_avp", "$avp(RECEIVED)")
 #       their own keep-alives.
 #!endif
 
-#!ifdef WITH_MSRP
-# ----- htable params -----
-modparam("htable", "htable", "msrp=>size=8;autoexpire=MSRP_MAX_EXPIRES;")
-#!endif
-
 
 ####### Routing Logic ########
 
@@ -178,16 +165,6 @@ modparam("htable", "htable", "msrp=>size=8;autoexpire=MSRP_MAX_EXPIRES;")
 # - processing of any incoming SIP request starts with this route
 # - note: this is the same as route { ... }
 request_route {
-
-        xlog("L_NOTICE", "request_route\n");
-
-
-	if ((($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT)
-		&& !(proto == WS || proto == WSS)) || $Rp == MY_MSRP_PORT) {
-		xlog("L_WARN", "SIP request received on $Rp\n");
-		sl_send_reply("403", "Forbidden");
-		exit;
-	}
 
 	# per request initial checks
 	route(REQINIT);
@@ -214,7 +191,11 @@ request_route {
 	# handle requests within SIP dialogs
 	route(WITHINDLG);
 
-	### only initial requests (no To tag)
+	# OPTIONS processing
+    if (uri == myself && is_method("OPTIONS") && !(uri=~"sip:.*[@]+.*")) {
+      options_reply();
+      exit;
+    }
 
 	# CANCEL processing
 	if (is_method("CANCEL")) {
@@ -226,81 +207,80 @@ request_route {
 
 	t_check_trans();
 
-	# authentication
-	# route(AUTH);
-
 	# record routing for dialog forming requests (in case they are routed)
 	# - remove preloaded route headers
 	remove_hf("Route");
-	if (is_method("INVITE")) {
-	# http://kamailio.org/docs/modules/devel/modules/rtpproxy-ng.html
-	# 5.2.  rtpproxy_offer
-	# s/S SRTP off/on
-	# p/P advanced RTCP profile with feedback off/on
-	# c - flags to change the session-level SDP connection (c=)
 
-        if ($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT) {
-	    xlog("L_NOTICE", "WS Convert SDP any->AVP\n");
-	    rtpproxy_manage("cosp");
-	  }
-	  else
-	  {
-	    xlog("L_NOTICE", "UDP Convert SDP any->SAVPF\n");
-	    rtpproxy_manage("coSP");
-	  }
-	  record_route();
-	}
+   	# REGISTER processing
+    if (is_method("REGISTER")) {
+      route(REGISTER_REQUEST);	
+      route(RELAY);
+    }
 
-	# handle registrations
-	route(REGISTER_REQUEST);	
-
-	if ($rU==$null) {
-		# request with no Username in RURI
-		sl_send_reply("484", "Address Incomplete");
-		exit;
-	}
+   	# INVITE processing
+	route(INVITE_REQUEST);	
 
 	# user location service
-
-
-        if ($Rp != MY_WS_PORT && $Rp != MY_WSS_PORT) {
-	    xlog("L_NOTICE", "Incoming 	Outdoor Server  call, lookup user\n");
+    if ($Rp != MY_WS_PORT && $Rp != MY_WSS_PORT) {
 	    route(LOCATION);
 	  }
 
 	route(RELAY);
 }
 
-
 route[RELAY] {
-	     
+
 	if (uri == myself) {
 	  if (!t_relay_to_udp("SBC_IP", "SBC_PORT")) 
 	     sl_reply_error();
 	}
-	else {
-	  if (!t_relay()) 
+
+    if (!t_relay()) 
 	     sl_reply_error();
-	}
-	exit;
+
+    exit;
 }
 
 # Per SIP request initial checks
 route[REQINIT] {
-	if (!mf_process_maxfwd_header("10")) {
-		sl_send_reply("483", "Too Many Hops");
-		exit;
-	}
 
-	if (!sanity_check("1511", "7")) {
-		xlog("Malformed SIP message from $si:$sp\n");
-		exit;
-	}
+  # Logging the request
+  if (is_method("CANCEL|BYE|ACK"))
+    xlog("L_NOTICE", "$rm [$cs] ($ci)\n");
+  else
+    xlog("L_NOTICE", "$rm $fu ($au) -> $tU ($ru) [$cs] ($ci) $si:$sp - $ua\n");
 
-	if (uri == myself && is_method("OPTIONS") && !(uri=~"sip:.*[@]+.*")) {
-		options_reply();
-		exit;
-	}
+  if (($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT) && !(proto == WS || proto == WSS)) {
+	xlog("L_WARN", "SIP (UDP/TCP/TLS) request received on $Rp (HTTP/HTTPS Port)\n");
+	sl_send_reply("403", "Forbidden");
+	exit;
+  }
+
+  if (src_port!=SBC_PORT && src_ip!=SBC_IP && (proto != WS || proto != WSS))
+  {
+	xlog("L_WARN", "only SBC UDP|TCP|TLS requests are allowed\n");
+	sl_send_reply("403", "Forbidden");
+	exit;
+  }
+
+  if (msg:len >=  MAX_MESSAGE_SIZE) {
+    sl_send_reply("513", "Message too big. MAX_MESSAGE_SIZE bytes limit (W2S).");
+    xlog("L_WARN", "Message too big\n");
+    exit;
+  }
+
+  # Loop prevention
+  if (!mf_process_maxfwd_header('10')) {
+    sl_send_reply('483','Too Many Hops. (W2S)');
+    xlog("L_WARN", "Too many hops\n");
+    exit;
+  }
+
+  if (!sanity_check("1511", "7")) {
+    xlog("L_WARN", "Malformed SIP message from $si:$sp\n");
+    exit;
+  }
+ 
 }
 
 # Handle requests within SIP dialogs
@@ -339,11 +319,29 @@ route[WITHINDLG] {
 	}
 }
 
+route[INVITE_REQUEST] {
+    # http://kamailio.org/docs/modules/devel/modules/rtpproxy-ng.html
+    # 5.2.  rtpproxy_offer
+    # s/s srtp off/on
+    # p/p advanced rtcp profile with feedback off/on
+    # c - flags to change the session-level sdp connection (c=)
+
+    if (is_method("INVITE")) {
+      if ($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT) {
+        xlog("L_NOTICE", "WS Convert SDP any->AVP\n");
+	rtpproxy_manage("cosp");
+      }
+      else {
+        xlog("L_NOTICE", "UDP Convert SDP any->SAVPF\n");
+	rtpproxy_manage("coSP");
+      }
+      record_route();
+    }
+}	
+
 
 route[REGISTER_REQUEST] {
-
     if (is_method("REGISTER")) {
-
       if (!t_newtran()) {
         sl_reply_error();
         exit;
@@ -352,9 +350,7 @@ route[REGISTER_REQUEST] {
       route(REGISTRAR);
       route(PATH_REGISTER_REQUEST);
       t_on_reply("REGISTER_REPLY");
-      route(RELAY);
     }
-
 }
 
 # Handle SIP registrations
@@ -391,13 +387,6 @@ route[PATH_REGISTER_REQUEST] {
 
 # USER location service
 route[LOCATION] {
-#	if (!is_subscriber("$ru", "subscriber", "1")) {
-#		t_newtran();
-#		send_reply("404", "Not Found");
-#		exit;
-#	}
-
-	xlog("L_NOTICE", "route[LOCATION] $ru \n");
 
 	if (!lookup("location")) {
 		$var(rc) = $rc;
@@ -408,14 +397,16 @@ route[LOCATION] {
 			xlog("L_NOTICE", "Unknown $ru, traverse through \n");
 			break;
 		case -2:
+			xlog("L_ERR", "Unknown method. Cant locate user.\n");
 			send_reply("405", "Method Not Allowed");
 			exit;
 		case -3:
+			xlog("L_ERR", "location service error\n");
 			send_reply("500", "Server Internal Error");
 			exit;
 		default:
-			xlog("L_NOTICE", "Imposible, Unknown LookUp  Error $var(rc) \n");
-			
+			xlog("L_ERR", "Impossible, Unknown LookUp  Error $var(rc) \n");
+			send_reply("500", "Server Internal Error");
 		}
 	}
 	else {
@@ -423,21 +414,21 @@ route[LOCATION] {
 	     # If there are such contacts, Request-URI will be overwritten with 
 	     # the contact that has the highest q value and optionally the rest 
 	     # will be appended to the message (depending on append_branches parameter value). 
-	     xlog("L_NOTICE", "lookup success \n");
-	}	
+	     xlog("L_NOTICE", "found registered user ReqUri:$ru To:$tu \n");
+	}
 }
 
 #!ifdef WITH_WEBSOCKETS
 onreply_route {
 
+    xlog("L_NOTICE", "$rr ($rs) [$cs] ($ci) $si:$sp - $ua\n");
 
-	if ((($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT)
-		&& !(proto == WS || proto == WSS)) || $Rp == MY_MSRP_PORT) {
+	if (($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT)
+		&& !(proto == WS || proto == WSS)) {
 		xlog("L_WARN", "SIP response received on $Rp\n");
 		drop;
 		exit;
 	}
-
 
 	if (nat_uac_test(64)) {
 		# Do NAT traversal stuff for replies to a WebSocket connection
@@ -447,38 +438,24 @@ onreply_route {
 		add_contact_alias();
 	}
 
-
 	if (is_method("INVITE")) {
-
-
         if ($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT) {
-	    xlog("L_NOTICE", "WS 200ok Convert SDP any->AVP\n");
+	    xlog("L_NOTICE", "Convert SDP any->AVP\n");
 	    rtpproxy_manage("cosp");
 	  }
 	  else
 	  {
-	    xlog("L_NOTICE", "UDP 200ok Convert SDP any->SAVPF\n");
+	    xlog("L_NOTICE", "Convert SDP any->SAVPF\n");
 	    rtpproxy_manage("coSP");
 	  }
-
 	}
-
 }
 
 onreply_route[REGISTER_REPLY] {
 			      
-    xlog("L_NOTICE", "REGISTER_REPLY $hdr(Contact)\n");
-
     if(is_method("REGISTER"))
       {
-        if(status=="200")
-	  {
-
-	     if ( !t_check_trans() ) {
-	       xlog("L_WARNING", "Bad REGISTER REPLY transaction");
-	       exit();
-	     }
-
+       if(status=="200") {
 	     $var(cstr) = $hdr(Contact);
 	     $var(expires) = $(var(cstr){re.subst,/.*expires=([0-9]*).*/\1/g});
 	     # avp_print();
@@ -486,7 +463,6 @@ onreply_route[REGISTER_REPLY] {
 	     remove_hf("Contact");
 	     append_hf("Contact: <sip:$avp(g_webrtc_stream_id);transport=ws>;expires=$var(expires)\r\n","CSeq");
 	   }
-	   
       }
 }
 
@@ -545,75 +521,5 @@ event_route[xhttp:request] {
 
 event_route[websocket:closed] {
 	xlog("L_INFO", "WebSocket connection from $si:$sp has closed\n");
-}
-#!endif
-
-#!ifdef WITH_MSRP
-event_route[msrp:frame-in] {
-	msrp_reply_flags("1");
-
-	if ((($Rp == MY_WS_PORT || $Rp == MY_WSS_PORT)
-		&& !(proto == WS || proto == WSS)) && $Rp != MY_MSRP_PORT) {
-		xlog("L_WARN", "MSRP request received on $Rp\n");
-		msrp_reply("403", "Action-not-allowed");
-		exit;
-	}
-
-	if (msrp_is_reply()) {
-		msrp_relay();
-	} else if($msrp(method)=="AUTH") {
-		if($msrp(nexthops)>0) {
-			msrp_relay();
-			exit;
-		}
-
-		if ($hdr(Expires) != $null) {
-			$var(expires) = (int) $hdr(Expires);
-			if ($var(expires) < MSRP_MIN_EXPIRES) {
-				msrp_reply("423", "Interval Out-of-Bounds",
-					"Min-Expires: MSRP_MIN_EXPIRES\r\n");
-				exit;
-			} else if ($var(expires) > MSRP_MAX_EXPIRES) {
-				msrp_reply("423", "Interval Out-of-Bounds",
-					"Max-Expires: MSRP_MAX_EXPIRES\r\n");
-				exit;
-			}
-		} else {
-			$var(expires) = MSRP_MAX_EXPIRES;
-		}
-
-		$var(cnt) = $var(cnt) + 1;
-		pv_printf("$var(sessid)", "s.$(pp).$(var(cnt)).$(RANDOM)");
-		$sht(msrp=>$var(sessid)::srcaddr) = $msrp(srcaddr);
-		$sht(msrp=>$var(sessid)::srcsock) = $msrp(srcsock);
-		$shtex(msrp=>$var(sessid)) = $var(expires) + 5;
-		# - Use-Path: the MSRP address for server + session id
-		$var(hdrs) = "Use-Path: msrps://MY_IP_ADDR:MY_MSRP_PORT/"
-					+ $var(sessid) + ";tcp\r\n"
-					+ "Expires: " + $var(expires) + "\r\n";
-		msrp_reply("200", "OK", "$var(hdrs)");
-	} else if ($msrp(method)=="SEND" || $msrp(method)=="REPORT") {
-		if ($msrp(nexthops)>1) {
-			if ($msrp(method)!="REPORT") {
-				msrp_reply("200", "OK");
-			}
-			msrp_relay();
-			exit;
-		}
-		$var(sessid) = $msrp(sessid);
-		if ($sht(msrp=>$var(sessid)::srcaddr) == $null) {
-			# one more hop, but we don't have address in htable
-			msrp_reply("481", "Session-does-not-exist");
-			exit;
-		} else if ($msrp(method)!="REPORT") {
-			msrp_reply("200", "OK");
-		}
-		msrp_relay_flags("1");
-		msrp_set_dst("$sht(msrp=>$var(sessid)::srcaddr)",
-				"$sht(msrp=>$var(sessid)::srcsock)");
-		msrp_relay();
-	} else {
-		msrp_reply("501", "Request-method-not-understood");
-	}
 }
 #!endif
